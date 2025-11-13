@@ -246,7 +246,7 @@ void pthread_exit(void *value_ptr) {
     tcb->state = THREAD_EXITED;
     tcb->retval = value_ptr;
     
-    if (tcb->joiner < 0 || tcb->joiner >= MAX_THREADS) {
+    if (tcb->joiner >= 0 && tcb->joiner < MAX_THREADS) {
         int j = tcb->joiner;
         if (thread_table[j].state == THREAD_BLOCKED) {
             thread_table[j].state = THREAD_READY;
