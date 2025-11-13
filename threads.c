@@ -261,7 +261,7 @@ void pthread_exit(void *value_ptr) {
         }
     }
     
-    exit(0);
+    schedule_threads();
 }
 
 pthread_t pthread_self() {
@@ -305,6 +305,7 @@ int pthread_join(pthread_t thread, void **value_ptr) {
         thread_table[thread].arg = NULL;
         thread_table[thread].retval = NULL;
         thread_table[thread].joiner = -1;
+        
         unlock();
         return 0;
     }
