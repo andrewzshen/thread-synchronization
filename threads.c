@@ -10,6 +10,9 @@
 
 #define STACK_SIZE 32767
 
+#define SEM_VALUE_MAX 65536
+#define MAX_SEMAPHORE 128
+
 #define THREAD_TIMER_PERIOD 50000 // 50 ms
 
 #define JB_RBX 0
@@ -48,6 +51,8 @@ typedef struct my_sem {
     int num_waiters;
     int initialized;
 } my_sem_t;
+
+static my_sem_t sem_pool[MAX_SEMAPHORE];
 
 static tcb_t thread_table[MAX_THREADS];
 static int ready = 0;
@@ -351,13 +356,32 @@ int sem_init(sem_t *sem, int pshared, unsigned int value) {
         return -1;
     }
 
+    if (value > SEM_VALUE_MAX) {
+        return -1;
+    }
+
     if (pshared != 0) {
         errno = EINVAL;
         return -1;
     }
+    
+    lock();
 
-    my_sem_t *s = (my_sem_t *)sem;
+    int id = -1;
+    for (int i = 0; i < MAX_SEMAPHORE; i++) {
+        if (!sem_pool[i].initialized) {
+            id = i;
+            break;
+        }
+    }
 
+    if (id == -1) {
+        unlock();
+        errno = ENOSPC;
+        return -1;
+    }
+    
+    my_sem_t *s = &sem_pool[id];
     s->value = (int)value;
     s->num_waiters = 0;
     s->initialized = 1;
@@ -365,6 +389,8 @@ int sem_init(sem_t *sem, int pshared, unsigned int value) {
     for (int i = 0; i < MAX_THREADS; i++) {
         s->waiters[i] = -1;
     }
+
+    sem->__align = id;
 
     return 0;
 }
@@ -375,7 +401,16 @@ int sem_destroy(sem_t *sem) {
         return -1;
     }
 
-    my_sem_t *s = (my_sem_t *)sem;
+    long id = (long)sem->__align;
+    
+    if (id < 0 || id >= MAX_SEMAPHORE) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    my_sem_t *s = &sem_pool[id];
+    
+    lock();
 
     if (!s->initialized) {
         errno = EINVAL;
@@ -395,6 +430,9 @@ int sem_destroy(sem_t *sem) {
         s->waiters[i] = -1;
     }
 
+    sem->__align = 0;    
+    
+    unlock();
     return 0;
 }
 
@@ -408,14 +446,21 @@ int sem_wait(sem_t *sem) {
         return -1;
     }
 
-    my_sem_t *s = (my_sem_t *)sem;
+    long id = (long)sem->__align;
+    
+    if (id < 0 || id >= MAX_SEMAPHORE) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    my_sem_t *s = &sem_pool[id];
+
+    lock();
 
     if (!s->initialized) {
         errno = EINVAL;
         return -1;
     }
-
-    lock();
     
     if (s->value > 0) {
         s->value--;
@@ -447,14 +492,21 @@ int sem_post(sem_t *sem) {
         return -1;
     }
 
-    my_sem_t *s = (my_sem_t *)sem;
+    long id = (long)sem->__align;
+    
+    if (id < 0 || id >= MAX_SEMAPHORE) {
+        errno = EINVAL;
+        return -1;
+    }
+        
+    my_sem_t *s = &sem_pool[id];
+
+    lock();
 
     if (!s->initialized) {
         errno = EINVAL;
         return -1;
     }
-
-    lock();
 
     if (s->num_waiters > 0) {
         int waiter = s->waiters[0];
@@ -476,5 +528,6 @@ int sem_post(sem_t *sem) {
     }
 
     unlock();
+    schedule_threads();
     return 0;
 }
