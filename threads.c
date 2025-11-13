@@ -46,6 +46,7 @@ typedef struct my_sem {
     int value;
     int waiters[MAX_THREADS];
     int num_waiters;
+    int initialized;
 } my_sem_t;
 
 static tcb_t thread_table[MAX_THREADS];
@@ -207,12 +208,12 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     }
 
     if (new_thread == -1) {
-        return -1;
+        return EAGAIN;
     }
 
     void *stack = malloc(STACK_SIZE);
     if (stack == NULL) {
-        return -1;
+        return ENOMEM;
     }
 
     tcb_t *tcb = &thread_table[new_thread];
@@ -284,7 +285,7 @@ int pthread_join(pthread_t thread, void **value_ptr) {
     }
 
     if (thread == curr_thread) {
-        return ESRCH;
+        return EDEADLK;
     }
 
     lock();
@@ -346,10 +347,12 @@ int sem_init(sem_t *sem, int pshared, unsigned int value) {
     }
 
     if (sem == NULL) {
+        errno = EINVAL;
         return -1;
     }
 
     if (pshared != 0) {
+        errno = EINVAL;
         return -1;
     }
 
@@ -357,6 +360,7 @@ int sem_init(sem_t *sem, int pshared, unsigned int value) {
 
     s->value = (int)value;
     s->num_waiters = 0;
+    s->initialized = 1;
 
     for (int i = 0; i < MAX_THREADS; i++) {
         s->waiters[i] = -1;
@@ -367,17 +371,25 @@ int sem_init(sem_t *sem, int pshared, unsigned int value) {
 
 int sem_destroy(sem_t *sem) {
     if (sem == NULL) {
+        errno = EINVAL;
         return -1;
     }
 
     my_sem_t *s = (my_sem_t *)sem;
 
+    if (!s->initialized) {
+        errno = EINVAL;
+        return -1;
+    }
+
     if (s->num_waiters != 0) {
+        errno = EBUSY;
         return -1;
     }
 
     s->value = 0;
     s->num_waiters = 0;
+    s->initialized = 0;
 
     for (int i = 0; i < MAX_THREADS; i++) {
         s->waiters[i] = -1;
@@ -392,30 +404,37 @@ int sem_wait(sem_t *sem) {
     }
 
     if (sem == NULL) {
+        errno = EINVAL;
         return -1;
     }
 
     my_sem_t *s = (my_sem_t *)sem;
 
-    while (1) {
-        lock();
-        if (s->value > 0) {
-            s->value--;
-            unlock();
-            return 0;
-        }
-
-        if (s->num_waiters >= MAX_THREADS) {
-            unlock();
-            return -1;
-        }
-
-        s->waiters[s->num_waiters++] = curr_thread;
-        thread_table[curr_thread].state = THREAD_BLOCKED;
-        
-        unlock();
-        schedule_threads();
+    if (!s->initialized) {
+        errno = EINVAL;
+        return -1;
     }
+
+    lock();
+    
+    if (s->value > 0) {
+        s->value--;
+        unlock();
+        return 0;
+    }
+
+    if (s->num_waiters >= MAX_THREADS) {
+        unlock();
+        errno = EAGAIN;
+        return -1;
+    }
+
+    s->waiters[s->num_waiters++] = curr_thread;
+    thread_table[curr_thread].state = THREAD_BLOCKED;
+    
+    unlock();
+    schedule_threads();
+    return 0;
 }
 
 int sem_post(sem_t *sem) {
@@ -424,10 +443,16 @@ int sem_post(sem_t *sem) {
     }
 
     if (sem == NULL) {
+        errno = EINVAL;
         return -1;
     }
 
     my_sem_t *s = (my_sem_t *)sem;
+
+    if (!s->initialized) {
+        errno = EINVAL;
+        return -1;
+    }
 
     lock();
 
