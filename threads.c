@@ -1,16 +1,16 @@
-#include <stdlib.h>
+#include <errno.h>
+#include <semaphore.h>
 #include <setjmp.h>
 #include <signal.h>
-#include <sys/time.h>
+#include <stdlib.h>
 #include <string.h>
-#include <semaphore.h>
-#include <errno.h>
+#include <sys/time.h>
 
 #define MAX_THREADS 128
 
 #define STACK_SIZE 32767
 
-#define THREAD_TIMER_PERIOD 50000 // 50 ms 
+#define THREAD_TIMER_PERIOD 50000 // 50 ms
 
 #define JB_RBX 0
 #define JB_RBP 1
@@ -19,7 +19,7 @@
 #define JB_R14 4
 #define JB_R15 5
 #define JB_RSP 6
-#define JB_PC  7
+#define JB_PC 7
 
 typedef enum thread_state {
     THREAD_EXITED,
@@ -34,10 +34,10 @@ typedef struct tcb {
 
     jmp_buf context;
     void *stack;
-    
+
     void *(*start_routine)(void *);
     void *arg;
-    
+
     void *retval;
     int joiner;
 } tcb_t;
@@ -65,7 +65,8 @@ void lock();
 void unlock();
 
 /* actual thread functions */
-int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void*), void *arg);
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                   void *(*start_routine)(void *), void *arg);
 void pthread_exit(void *value_ptr);
 pthread_t pthread_self();
 int pthread_join(pthread_t thread, void **value_ptr);
@@ -82,10 +83,9 @@ static long int i64_ptr_mangle(long int p) {
         " xor %%fs:0x30, %%rax;"
         " rol $0x11, %%rax;"
         " mov %%rax, %0;"
-    : "=r"(ret)
-    : "r"(p)
-    : "%rax"
-    );
+        : "=r"(ret)
+        : "r"(p)
+        : "%rax");
     return ret;
 }
 
@@ -93,7 +93,7 @@ static void init_threads() {
     if (ready) {
         return;
     }
-    
+
     for (size_t i = 0; i < MAX_THREADS; i++) {
         thread_table[i].thread_id = 0;
         thread_table[i].state = THREAD_EXITED;
@@ -103,10 +103,10 @@ static void init_threads() {
         thread_table[i].retval = NULL;
         thread_table[i].joiner = -1;
     }
-    
+
     curr_thread = 0;
     thread_table[curr_thread].thread_id = 0;
-    thread_table[curr_thread].state = THREAD_RUNNING;    
+    thread_table[curr_thread].state = THREAD_RUNNING;
     thread_table[curr_thread].stack = NULL;
     thread_table[curr_thread].start_routine = NULL;
     thread_table[curr_thread].arg = NULL;
@@ -120,14 +120,14 @@ static void init_threads() {
     sa.sa_flags = SA_NODEFER;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGALRM, &sa, NULL);
-    
+
     struct itimerval timer;
     timer.it_value.tv_sec = 0;
     timer.it_value.tv_usec = THREAD_TIMER_PERIOD;
     timer.it_interval.tv_sec = 0;
     timer.it_interval.tv_usec = THREAD_TIMER_PERIOD;
     setitimer(ITIMER_REAL, &timer, NULL);
-    
+
     ready = 1;
 }
 
@@ -139,21 +139,21 @@ static void thread_wrapper() {
 
 static void schedule_threads() {
     int prev_thread = curr_thread;
-    
+
     if (thread_table[prev_thread].state != THREAD_EXITED) {
         int ret = setjmp(thread_table[prev_thread].context);
         if (ret != 0) {
             return;
         }
-        
+
         if (thread_table[prev_thread].state == THREAD_RUNNING) {
             thread_table[prev_thread].state = THREAD_READY;
         }
     }
-    
+
     int next_thread = -1;
     int search_start = (curr_thread + 1) % MAX_THREADS;
-    
+
     for (int i = 0; i < MAX_THREADS; i++) {
         int index = (search_start + i) % MAX_THREADS;
         if (thread_table[index].state == THREAD_READY) {
@@ -161,7 +161,7 @@ static void schedule_threads() {
             break;
         }
     }
-    
+
     if (next_thread == -1) {
         if (thread_table[curr_thread].state == THREAD_READY) {
             next_thread = curr_thread;
@@ -169,16 +169,14 @@ static void schedule_threads() {
             exit(1);
         }
     }
-    
+
     curr_thread = next_thread;
     thread_table[curr_thread].state = THREAD_RUNNING;
-    
+
     longjmp(thread_table[curr_thread].context, 1);
 }
 
-static void sigalrm_handler(int sig) {
-    schedule_threads();
-}
+static void sigalrm_handler(int sig) { schedule_threads(); }
 
 void lock() {
     sigset_t set;
@@ -191,14 +189,15 @@ void unlock() {
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGALRM);
-    sigprocmask(SIG_UNBLOCK, &set, NULL);    
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
 }
 
-int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void*), void *arg) {
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                   void *(*start_routine)(void *), void *arg) {
     if (!ready) {
         init_threads();
     }
-    
+
     int new_thread = -1;
     for (size_t i = 0; i < MAX_THREADS; i++) {
         if (thread_table[i].state == THREAD_EXITED) {
@@ -206,16 +205,16 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_
             break;
         }
     }
-    
+
     if (new_thread == -1) {
         return -1;
     }
-    
+
     void *stack = malloc(STACK_SIZE);
     if (stack == NULL) {
         return -1;
     }
-    
+
     tcb_t *tcb = &thread_table[new_thread];
     tcb->thread_id = new_thread;
     tcb->state = THREAD_READY;
@@ -224,20 +223,20 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_
     tcb->arg = arg;
     tcb->retval = NULL;
     tcb->joiner = -1;
-    
+
     setjmp(tcb->context);
-    
+
     void *stack_top = (void *)((unsigned long)stack + STACK_SIZE);
-    
-    long int *jb = (long int *)tcb->context; 
+
+    long int *jb = (long int *)tcb->context;
     jb[JB_PC] = i64_ptr_mangle((long int)thread_wrapper);
-    
+
     unsigned long stack_address = (unsigned long)stack_top;
     stack_address &= ~0xFUL;
     jb[JB_RSP] = i64_ptr_mangle(stack_address);
-    
+
     *thread = tcb->thread_id;
-    
+
     return 0;
 }
 
@@ -245,7 +244,7 @@ void pthread_exit(void *value_ptr) {
     tcb_t *tcb = &thread_table[curr_thread];
     tcb->state = THREAD_EXITED;
     tcb->retval = value_ptr;
-    
+
     if (tcb->joiner >= 0 && tcb->joiner < MAX_THREADS) {
         int j = tcb->joiner;
         if (thread_table[j].state == THREAD_BLOCKED) {
@@ -260,7 +259,7 @@ void pthread_exit(void *value_ptr) {
             break;
         }
     }
-    
+
     schedule_threads();
 }
 
@@ -277,15 +276,15 @@ int pthread_join(pthread_t thread, void **value_ptr) {
     }
 
     if (thread < 0 || thread >= MAX_THREADS) {
-        return -1;
+        return ESRCH;
     }
 
     if (thread_table[thread].thread_id != thread) {
-        return -1;
+        return ESRCH;
     }
-    
+
     if (thread == curr_thread) {
-        return -1;
+        return ESRCH;
     }
 
     lock();
@@ -294,18 +293,18 @@ int pthread_join(pthread_t thread, void **value_ptr) {
         if (value_ptr) {
             *value_ptr = thread_table[thread].retval;
         }
-        
+
         if (thread_table[thread].stack) {
             free(thread_table[thread].stack);
             thread_table[thread].stack = NULL;
         }
-        
+
         thread_table[thread].thread_id = 0;
         thread_table[thread].start_routine = NULL;
         thread_table[thread].arg = NULL;
         thread_table[thread].retval = NULL;
         thread_table[thread].joiner = -1;
-        
+
         unlock();
         return 0;
     }
@@ -317,7 +316,7 @@ int pthread_join(pthread_t thread, void **value_ptr) {
 
     thread_table[thread].joiner = curr_thread;
     thread_table[curr_thread].state = THREAD_BLOCKED;
-    
+
     unlock();
     schedule_threads();
     lock();
@@ -325,7 +324,7 @@ int pthread_join(pthread_t thread, void **value_ptr) {
     if (value_ptr) {
         *value_ptr = thread_table[thread].retval;
     }
-    
+
     if (thread_table[thread].stack) {
         free(thread_table[thread].stack);
         thread_table[thread].stack = NULL;
@@ -355,14 +354,14 @@ int sem_init(sem_t *sem, int pshared, unsigned int value) {
     }
 
     my_sem_t *s = (my_sem_t *)sem;
-    
+
     s->value = (int)value;
     s->num_waiters = 0;
-    
-    for (int i = 0; i < MAX_THREADS; i++) { 
+
+    for (int i = 0; i < MAX_THREADS; i++) {
         s->waiters[i] = -1;
     }
-    
+
     return 0;
 }
 
@@ -383,7 +382,7 @@ int sem_destroy(sem_t *sem) {
     for (int i = 0; i < MAX_THREADS; i++) {
         s->waiters[i] = -1;
     }
-    
+
     return 0;
 }
 
@@ -393,14 +392,13 @@ int sem_wait(sem_t *sem) {
     }
 
     if (sem == NULL) {
-        errno = EINVAL;
         return -1;
     }
-    
+
     my_sem_t *s = (my_sem_t *)sem;
 
     lock();
-     
+
     if (s->value > 0) {
         s->value--;
         unlock();
@@ -408,7 +406,6 @@ int sem_wait(sem_t *sem) {
     }
 
     if (s->num_waiters >= MAX_THREADS) {
-        errno = EAGAIN;
         unlock();
         return -1;
     }
@@ -427,39 +424,30 @@ int sem_post(sem_t *sem) {
     }
 
     if (sem == NULL) {
-        errno = EINVAL;
         return -1;
     }
-     
+
     my_sem_t *s = (my_sem_t *)sem;
-    
+
     lock();
-    
-    s->value++;
-    
-    if (s->value > 0) {
-        unlock();
-        return 0;
-    }
 
-    if (s->num_waiters <= 0) {
-        unlock();
-        return 0;
-    }
+    if (s->num_waiters > 0) {
+        int waiter = s->waiters[0];
 
-    int waiter = s->waiters[0];
-    
-    for (int i = 1; i < s->num_waiters; i++) {
-        s->waiters[i - 1] = s->waiters[i];
-    }
-    
-    s->num_waiters--;
-    s->waiters[s->num_waiters] = -1;
-    
-    if (waiter < 0 || waiter >= MAX_THREADS) {
-        if (thread_table[waiter].state == THREAD_BLOCKED) {
-            thread_table[waiter].state = THREAD_READY;
+        for (int i = 1; i < s->num_waiters; i++) {
+            s->waiters[i - 1] = s->waiters[i];
         }
+
+        s->num_waiters--;
+        s->waiters[s->num_waiters] = -1;
+
+        if (waiter >= 0 && waiter < MAX_THREADS) {
+            if (thread_table[waiter].state == THREAD_BLOCKED) {
+                thread_table[waiter].state = THREAD_READY;
+            }
+        }
+    } else {
+        s->value++;
     }
 
     unlock();
