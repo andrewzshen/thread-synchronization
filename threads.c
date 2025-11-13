@@ -4,6 +4,7 @@
 #include <sys/time.h>
 #include <string.h>
 #include <semaphore.h>
+#include <errno.h>
 
 #define MAX_THREADS 128
 
@@ -145,7 +146,9 @@ static void schedule_threads() {
             return;
         }
         
-        thread_table[prev_thread].state = THREAD_READY;
+        if (thread_table[prev_thread].state == THREAD_RUNNING) {
+            thread_table[prev_thread].state = THREAD_READY;
+        }
     }
     
     int next_thread = -1;
@@ -277,6 +280,10 @@ int pthread_join(pthread_t thread, void **value_ptr) {
         return -1;
     }
 
+    if (thread_table[thread].thread_id != thread) {
+        return -1;
+    }
+    
     if (thread == curr_thread) {
         return -1;
     }
