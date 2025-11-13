@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <string.h>
+#include <semaphore.h>
 
 #define MAX_THREADS 128
 
@@ -23,6 +24,7 @@ typedef enum thread_state {
     THREAD_EXITED,
     THREAD_READY,
     THREAD_RUNNING,
+    THREAD_BLOCKED,
 } thread_state_t;
 
 typedef struct tcb {
@@ -34,7 +36,16 @@ typedef struct tcb {
     
     void *(*start_routine)(void *);
     void *arg;
+    
+    void *retval;
+    int joiner;
 } tcb_t;
+
+typedef struct my_sem {
+    int value;
+    int waiters[MAX_THREADS];
+    int num_waiters;
+} my_sem_t;
 
 static tcb_t thread_table[MAX_THREADS];
 static int ready = 0;
@@ -48,9 +59,20 @@ static void thread_wrapper();
 
 static void sigalrm_handler(int sig);
 
+/* locking helpers */
+void lock();
+void unlock();
+
+/* actual thread functions */
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void*), void *arg);
 void pthread_exit(void *value_ptr);
 pthread_t pthread_self();
+int pthread_join(pthread_t thread, void **value_ptr);
+
+/* semaphore functions */
+int sem_init(sem_t *sem, int pshared, unsigned int value);
+int sem_destroy(sem_t *sem);
+int sem_wait(sem_t *sem);
 
 static long int i64_ptr_mangle(long int p) {
     // From Canvas
@@ -77,6 +99,8 @@ static void init_threads() {
         thread_table[i].stack = NULL;
         thread_table[i].start_routine = NULL;
         thread_table[i].arg = NULL;
+        thread_table[i].retval = NULL;
+        thread_table[i].joiner = -1;
     }
     
     curr_thread = 0;
@@ -85,6 +109,8 @@ static void init_threads() {
     thread_table[curr_thread].stack = NULL;
     thread_table[curr_thread].start_routine = NULL;
     thread_table[curr_thread].arg = NULL;
+    thread_table[curr_thread].retval = NULL;
+    thread_table[curr_thread].joiner = -1;
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -151,6 +177,20 @@ static void sigalrm_handler(int sig) {
     schedule_threads();
 }
 
+void lock() {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+}
+
+void unlock() {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);    
+}
+
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void*), void *arg) {
     if (!ready) {
         init_threads();
@@ -179,6 +219,8 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_
     tcb->stack = stack;
     tcb->start_routine = start_routine;
     tcb->arg = arg;
+    tcb->retval = NULL;
+    tcb->joiner = -1;
     
     setjmp(tcb->context);
     
@@ -199,7 +241,16 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_
 void pthread_exit(void *value_ptr) {
     tcb_t *tcb = &thread_table[curr_thread];
     tcb->state = THREAD_EXITED;
+    tcb->retval = value_ptr;
     
+    if (tcb->joiner >= 0 && tcb->joiner < MAX_THREADS) {
+        int j = tcb->joiner;
+        if (thread_table[j].state == THREAD_BLOCKED) {
+            thread_table[j].state = THREAD_READY;
+        }
+        tcb->joiner = -1;
+    }
+
     for (size_t i = 0; i < MAX_THREADS; i++) {
         if (thread_table[i].state != THREAD_EXITED) {
             schedule_threads();
@@ -215,4 +266,172 @@ pthread_t pthread_self() {
         init_threads();
     }
     return thread_table[curr_thread].thread_id;
+}
+
+int pthread_join(pthread_t thread, void **value_ptr) {
+    if (!ready) {
+        init_threads();
+    }
+
+    if (thread < 0 || thread >= MAX_THREADS) {
+        return -1;
+    }
+
+    if (thread == curr_thread) {
+        return -1;
+    }
+
+    lock();
+
+    if (thread_table[thread].state == THREAD_EXITED) {
+        if (value_ptr) {
+            *value_ptr = thread_table[thread].retval;
+        }
+        
+        if (thread_table[thread].stack) {
+            free(thread_table[thread].stack);
+            thread_table[thread].stack = NULL;
+        }
+        thread_table[thread].thread_id = 0;
+        thread_table[thread].start_routine = NULL;
+        thread_table[thread].arg = NULL;
+        thread_table[thread].retval = NULL;
+        thread_table[thread].joiner = -1;
+        unlock();
+        return 0;
+    }
+
+    if (thread_table[thread].joiner != -1) {
+        unlock();
+        return -1;
+    }
+
+    thread_table[thread].joiner = curr_thread;
+    thread_table[curr_thread].state = THREAD_BLOCKED;
+    
+    unlock();
+
+    schedule_threads();
+
+    lock();
+
+    if (value_ptr) {
+        *value_ptr = thread_table[thread].retval;
+    }
+    
+    if (thread_table[thread].stack) {
+        free(thread_table[thread].stack);
+        thread_table[thread].stack = NULL;
+    }
+    thread_table[thread].thread_id = 0;
+    thread_table[thread].start_routine = NULL;
+    thread_table[thread].arg = NULL;
+    thread_table[thread].retval = NULL;
+    thread_table[thread].joiner = -1;
+
+    unlock();
+
+    return 0;
+}
+
+int sem_init(sem_t *sem, int pshared, unsigned int value) {
+    if (!ready) {
+        init_threads();
+    }
+
+    my_sem_t *s = (my_sem_t *)sem;
+    
+    s->value = (int)value;
+    s->num_waiters = 0;
+    
+    for (int i = 0; i < MAX_THREADS; i++) { 
+        s->waiters[i] = -1;
+    }
+    
+    return 0;
+}
+
+int sem_destroy(sem_t *sem) {
+    my_sem_t *s = (my_sem_t *)sem;
+
+    if (s->num_waiters != 0) return -1;
+    
+    s->value = 0;
+    s->num_waiters = 0;
+
+    for (int i = 0; i < MAX_THREADS; i++) {
+        s->waiters[i] = -1;
+    }
+    
+    return 0;
+}
+
+int sem_wait(sem_t *sem) {
+    if (!ready) {
+        init_threads();
+    }
+    
+    my_sem_t *s = (my_sem_t *)sem;
+
+    lock();
+    
+    s->value--;
+    
+    if (s->value >= 0) {
+        unlock();
+        return 0;
+    }
+
+    if (s->num_waiters >= MAX_THREADS) {
+        s->value++;
+        unlock();
+        return -1;
+    }
+
+    s->waiters[s->num_waiters++] = curr_thread;
+    thread_table[curr_thread].state = THREAD_BLOCKED;
+
+    unlock();
+    schedule_threads();
+    return 0;
+}
+
+int sem_post(sem_t *sem) {
+    if (!ready) {
+        init_threads();
+    }
+     
+    my_sem_t *s = (my_sem_t *)sem;
+    
+    lock();
+    
+    s->value++;
+    
+    if (s->value > 0) {
+        unlock();
+        return 0;
+    }
+
+    if (s->num_waiters <= 0) {
+        unlock();
+        return 0;
+    }
+
+    int waiter = s->waiters[0];
+    
+    for (int i = 1; i < s->num_waiters; i++) {
+        s->waiters[i - 1] = s->waiters[i];
+    }
+    
+    s->num_waiters--;
+    s->waiters[s->num_waiters] = -1;
+    
+    if (waiter >= 0 && waiter < MAX_THREADS) {
+        if (thread_table[waiter].state == THREAD_BLOCKED) {
+            thread_table[waiter].state = THREAD_READY;
+        }
+    }
+
+    unlock();
+    return 0;
 }
