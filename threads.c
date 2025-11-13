@@ -397,25 +397,25 @@ int sem_wait(sem_t *sem) {
 
     my_sem_t *s = (my_sem_t *)sem;
 
-    lock();
+    while (1) {
+        lock();
+        if (s->value > 0) {
+            s->value--;
+            unlock();
+            return 0;
+        }
 
-    if (s->value > 0) {
-        s->value--;
+        if (s->num_waiters >= MAX_THREADS) {
+            unlock();
+            return -1;
+        }
+
+        s->waiters[s->num_waiters++] = curr_thread;
+        thread_table[curr_thread].state = THREAD_BLOCKED;
+        
         unlock();
-        return 0;
+        schedule_threads();
     }
-
-    if (s->num_waiters >= MAX_THREADS) {
-        unlock();
-        return -1;
-    }
-
-    s->waiters[s->num_waiters++] = curr_thread;
-    thread_table[curr_thread].state = THREAD_BLOCKED;
-
-    unlock();
-    schedule_threads();
-    return 0;
 }
 
 int sem_post(sem_t *sem) {
